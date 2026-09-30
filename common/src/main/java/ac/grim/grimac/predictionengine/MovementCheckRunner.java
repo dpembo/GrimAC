@@ -1,10 +1,9 @@
 package ac.grim.grimac.predictionengine;
 
 import ac.grim.grimac.api.config.ConfigManager;
-import ac.grim.grimac.checks.Check;
+import ac.grim.grimac.checks.GrimProcessor;
 import ac.grim.grimac.checks.impl.prediction.Phase;
 import ac.grim.grimac.checks.impl.vehicle.VehicleC;
-import ac.grim.grimac.checks.type.PositionCheck;
 import ac.grim.grimac.manager.SetbackTeleportUtil;
 import ac.grim.grimac.player.GrimPlayer;
 import ac.grim.grimac.predictionengine.movementtick.MovementTickerCamel;
@@ -51,8 +50,9 @@ import com.github.retrooper.packetevents.protocol.player.ClientVersion;
 import com.github.retrooper.packetevents.protocol.player.GameMode;
 import com.github.retrooper.packetevents.protocol.world.states.defaulttags.BlockTags;
 import com.github.retrooper.packetevents.protocol.world.states.type.StateTypes;
+import org.jetbrains.annotations.NotNull;
 
-public class MovementCheckRunner extends Check implements PositionCheck {
+public class MovementCheckRunner extends GrimProcessor {
     // Averaged over 500 predictions (Defaults set slightly above my 3600x results)
     public static double predictionNanos = 0.3 * 1e6;
     // Averaged over 20000 predictions
@@ -136,7 +136,7 @@ public class MovementCheckRunner extends Check implements PositionCheck {
         // Manually call prediction complete to handle teleport
         PredictionComplete predictionComplete = new PredictionComplete(0, update, true);
         player.getSetbackTeleportUtil().onPredictionComplete(predictionComplete);
-        player.checkManager.getPostPredictionCheck(Phase.class).onPredictionComplete(predictionComplete);
+        player.checkManager.get(Phase.class).onPredictionComplete(predictionComplete);
 
         player.uncertaintyHandler.lastHorizontalOffset = 0;
         player.uncertaintyHandler.lastVerticalOffset = 0;
@@ -296,7 +296,7 @@ public class MovementCheckRunner extends Check implements PositionCheck {
 
             // For whatever reason the vehicle move packet occurs AFTER the player changes slots...
             if (riding instanceof PacketEntityRideable) {
-                VehicleC vehicleC = player.checkManager.getCheck(VehicleC.class);
+                VehicleC vehicleC = player.checkManager.get(VehicleC.class);
 
                 ItemType requiredItem = riding.getType() == EntityTypes.PIG ? ItemTypes.CARROT_ON_A_STICK : ItemTypes.WARPED_FUNGUS_ON_A_STICK;
                 ItemStack mainHand = player.inventory.getHeldItem();
@@ -394,6 +394,7 @@ public class MovementCheckRunner extends Check implements PositionCheck {
                     player.uncertaintyHandler.isSteppingOnBouncyBlock = true;
                 }
             }
+
             if (block.getType() == StateTypes.HONEY_BLOCK) {
                 if (player.getClientVersion().isOlderThanOrEquals(ClientVersion.V_1_14)
                         && player.getClientVersion().isNewerThanOrEquals(ClientVersion.V_1_8)) {
@@ -403,15 +404,25 @@ public class MovementCheckRunner extends Check implements PositionCheck {
                 }
                 player.uncertaintyHandler.isSteppingOnHoney = true;
             }
+
             if (BlockTags.BEDS.contains(block.getType()) && Math.abs((y + 0.5625D) - player.lastY) <= player.getMovementThreshold() && player.getClientVersion().isNewerThanOrEquals(ClientVersion.V_1_12)) {
                 player.uncertaintyHandler.isSteppingOnBouncyBlock = true;
             }
+
+            if (block.getType() == StateTypes.SHELF_MUSHROOM && player.getClientVersion().isNewerThanOrEquals(ClientVersion.V_26_3)
+                    && (Math.abs((y + 0.6875) - player.lastY) <= player.getMovementThreshold()
+                    || Math.abs((y + (block.getAge() == 0 ? 0.5625 : 0.5)) - player.lastY) <= player.getMovementThreshold())) {
+                player.uncertaintyHandler.isSteppingOnBouncyBlock = true;
+            }
+
             if (BlockTags.ICE.contains(block.getType())) {
                 player.uncertaintyHandler.isSteppingOnIce = true;
             }
+
             if (block.getType() == StateTypes.BUBBLE_COLUMN && player.getClientVersion().isNewerThanOrEquals(ClientVersion.V_1_13)) {
                 player.uncertaintyHandler.isSteppingNearBubbleColumn = true;
             }
+
             if (block.getType() == StateTypes.SCAFFOLDING) {
                 player.uncertaintyHandler.isSteppingNearScaffolding = true;
             }
@@ -701,7 +712,7 @@ public class MovementCheckRunner extends Check implements PositionCheck {
     }
 
     @Override
-    public void onReload(ConfigManager config) {
+    public void onReload(@NotNull ConfigManager config) {
         allowSprintJumpingWithElytra = config.getBooleanElse("exploit.allow-sprint-jumping-when-using-elytra", true);
     }
 }

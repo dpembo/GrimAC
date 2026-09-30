@@ -9,46 +9,40 @@ import ac.grim.grimac.api.storage.verbose.VerboseBuf;
 import ac.grim.grimac.api.storage.verbose.VerboseRenderContext;
 import ac.grim.grimac.internal.storage.verbose.VerboseRegistry;
 import ac.grim.grimac.player.GrimPlayer;
-import com.github.retrooper.packetevents.protocol.packettype.PacketType;
-import com.github.retrooper.packetevents.protocol.packettype.PacketTypeCommon;
-import com.github.retrooper.packetevents.protocol.player.ClientVersion;
-import com.github.retrooper.packetevents.protocol.player.DiggingAction;
 import lombok.Getter;
 import lombok.Setter;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Objects;
 import java.util.function.Supplier;
 
-import static com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerFlying.isFlying;
-
 // Class from https://github.com/Tecnio/AntiCheatBase/blob/master/src/main/java/me/tecnio/anticheat/check/Check.java
 @Getter
 public class Check extends GrimProcessor implements AbstractCheck {
     private static final FlagEvent.Channel FLAG_CHANNEL = GrimAPI.INSTANCE.getEventBus().get(FlagEvent.class);
-
-    protected final @NotNull GrimPlayer player;
+    private static final ThreadLocal<VerboseBuf> VERBOSE = ThreadLocal.withInitial(VerboseBuf::new);
 
     // violations
     public double violations;
     private long lastViolationTime;
     private boolean lastFlagStoredBinaryVerbose;
-    private final VerboseBuf verbose = new VerboseBuf();
+    private final VerboseBuf verbose = VERBOSE.get();
 
     // check data
-    private final String checkName;
-    private final String configName;
-    private final String alternativeName;
-    private final String stableKey;
+    private final @Nullable String checkName;
+    private final @Nullable String configName;
+    private final @Nullable String alternativeName;
+    private final @NotNull String stableKey;
     private final boolean experimental;
-    private final String defaultDescription;
+    private final @NotNull String defaultDescription;
     private final double defaultDecay;
     private final double defaultSetbackVL;
 
     // configurable
-    private String displayName;
-    private String description;
+    private @MonotonicNonNull String displayName;
+    private @MonotonicNonNull String description;
     private double decay;
     private double setbackVL;
     @Setter private boolean isEnabled;
@@ -59,7 +53,7 @@ public class Check extends GrimProcessor implements AbstractCheck {
     private boolean noModifyPacketPermission;
 
     public Check(final @NotNull GrimPlayer player) {
-        this.player = Objects.requireNonNull(player, "player");
+        super(player, false);
 
         final CheckData checkData = this.getClass().getAnnotation(CheckData.class);
         if (checkData != null) {
@@ -96,9 +90,17 @@ public class Check extends GrimProcessor implements AbstractCheck {
                 && !exemptPermission;
     }
 
+    /**
+     * Evaluated once when CheckManager builds the dispatch arrays.
+     * Implementations must only depend on immutable connection properties.
+     */
+    public boolean isApplicable() {
+        return true;
+    }
+
     public final void updatePermissions() {
-        if (configName == null) return;
-        final String id = configName.toLowerCase();
+        if (getConfigName() == null) return;
+        final String id = getConfigName().toLowerCase();
         exemptPermission = player.hasPermission("grim.exempt." + id);
         noSetbackPermission = player.hasPermission("grim.nosetback." + id);
         noModifyPacketPermission = player.hasPermission("grim.nomodifypacket." + id);
@@ -178,17 +180,9 @@ public class Check extends GrimProcessor implements AbstractCheck {
 
     public final void registerVerboseTemplates(@Nullable VerboseRegistry registry) {
         if (registry == null || stableKey.isEmpty()) return;
-        String pluginVersion = safePluginVersion();
+        String pluginVersion = GrimAPI.INSTANCE.getExternalAPI().getGrimVersion();
         for (Verbose template : Verbose.declaredBy(getClass(), Check.class)) {
             registry.registerTemplate(stableKey, checkName, description, pluginVersion, template);
-        }
-    }
-
-    private static @Nullable String safePluginVersion() {
-        try {
-            return GrimAPI.INSTANCE.getExternalAPI().getGrimVersion();
-        } catch (RuntimeException e) {
-            return null;
         }
     }
 
@@ -229,19 +223,16 @@ public class Check extends GrimProcessor implements AbstractCheck {
     }
 
     @Override
-    public final void reload(ConfigManager configuration) {
-        decay = configuration.getDoubleElse(configName + ".decay", defaultDecay);
-        setbackVL = configuration.getDoubleElse(configName + ".setbackvl", defaultSetbackVL);
-        displayName = configuration.getStringElse(configName + ".displayname", checkName);
-        description = configuration.getStringElse(configName + ".description", defaultDescription);
+    public final void reload(@NotNull ConfigManager configuration) {
+        if (getConfigName() != null) {
+            decay = configuration.getDoubleElse(getConfigName() + ".decay", defaultDecay);
+            setbackVL = configuration.getDoubleElse(getConfigName() + ".setbackvl", defaultSetbackVL);
+            displayName = configuration.getStringElse(getConfigName() + ".displayname", checkName);
+            description = configuration.getStringElse(getConfigName() + ".description", defaultDescription);
 
-        if (setbackVL == -1) setbackVL = Double.MAX_VALUE;
-        onReload(configuration);
-    }
-
-    @Override
-    public void onReload(ConfigManager config) {
-
+            if (setbackVL == -1) setbackVL = Double.MAX_VALUE;
+        }
+        super.reload(configuration);
     }
 
     public boolean alert(String verbose) {
@@ -271,53 +262,6 @@ public class Check extends GrimProcessor implements AbstractCheck {
         return offset > 0.001 ? String.format("%.5f", offset) : String.format("%.2E", offset);
     }
 
-    public static boolean isTransaction(PacketTypeCommon packetType) {
-        return packetType == PacketType.Play.Client.PONG ||
-                packetType == PacketType.Play.Client.WINDOW_CONFIRMATION;
-    }
-
-    public static boolean isAsync(PacketTypeCommon packetType) {
-        return packetType == PacketType.Play.Client.KEEP_ALIVE
-                || packetType == PacketType.Play.Client.CHUNK_BATCH_ACK
-                || packetType == PacketType.Play.Client.RESOURCE_PACK_STATUS;
-    }
-
-    public boolean isUpdate(PacketTypeCommon packetType) {
-        return isFlying(packetType)
-                || packetType == PacketType.Play.Client.CLIENT_TICK_END
-                || isTransaction(packetType);
-    }
-
-    public boolean isTickPacket(PacketTypeCommon packetType) {
-        if (isTickPacketIncludingNonMovement(packetType)) {
-            if (isFlying(packetType)) {
-                return !player.packetStateData.lastPacketWasTeleport && !player.packetStateData.lastPacketWasOnePointSeventeenDuplicate;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    public boolean isTickPacketIncludingNonMovement(PacketTypeCommon packetType) {
-        // On 1.21.2+ fall back to the TICK_END packet IF the player did not send a movement packet for their tick
-        // TickTimer checks to see if player did not send a tick end packet before new flying packet is sent
-        if (player.getClientVersion().isNewerThanOrEquals(ClientVersion.V_1_21_2)
-                && !player.packetStateData.didSendMovementBeforeTickEnd) {
-            if (packetType == PacketType.Play.Client.CLIENT_TICK_END) {
-                return true;
-            }
-        }
-
-        return isFlying(packetType);
-    }
-
-    // prevent causing exploits with packet cancelling (ie noslow)
-    public boolean canCancel(DiggingAction action) {
-        return action != DiggingAction.RELEASE_USE_ITEM
-                // we check client version here because 1.8- doesn't predict dropping items, so we can cancel them. (see CompensatedInventory)
-                && (action != DiggingAction.DROP_ITEM && action != DiggingAction.DROP_ITEM_STACK || player.getClientVersion().isOlderThanOrEquals(ClientVersion.V_1_8));
-    }
-
     private static @NotNull Supplier<String> constant(String verbose) {
         String value = verbose == null ? "" : verbose;
         return () -> value;
@@ -334,7 +278,7 @@ public class Check extends GrimProcessor implements AbstractCheck {
                     try {
                         value = supplier.get();
                         if (value == null) value = "";
-                    } catch (Throwable ignored) {
+                    } catch (RuntimeException ignored) {
                         value = "";
                     }
                     computed = true;

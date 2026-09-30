@@ -1,14 +1,16 @@
 package ac.grim.grimac.checks.impl.misc;
 
 import ac.grim.grimac.api.config.ConfigManager;
-import ac.grim.grimac.checks.type.BlockPlaceCheck;
+import ac.grim.grimac.checks.GrimProcessor;
+import ac.grim.grimac.checks.type.BlockPlaceListener;
 import ac.grim.grimac.platform.api.world.PlatformWorld;
 import ac.grim.grimac.player.GrimPlayer;
 import ac.grim.grimac.utils.anticheat.update.BlockPlace;
 import com.github.retrooper.packetevents.protocol.world.states.WrappedBlockState;
 import com.github.retrooper.packetevents.util.Vector3i;
+import org.jetbrains.annotations.NotNull;
 
-public class GhostBlockMitigation extends BlockPlaceCheck {
+public class GhostBlockMitigation extends GrimProcessor implements BlockPlaceListener {
 
     private boolean allow;
     private int distance;
@@ -54,7 +56,7 @@ public class GhostBlockMitigation extends BlockPlaceCheck {
     }
 
     @Override
-    public void onReload(ConfigManager config) {
+    public void onReload(@NotNull ConfigManager config) {
         allow = config.getBooleanElse("exploit.allow-building-on-ghostblocks", true);
         distance = config.getIntElse("exploit.distance-to-check-for-ghostblocks", 2);
 

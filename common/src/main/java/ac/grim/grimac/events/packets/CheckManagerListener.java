@@ -1,6 +1,7 @@
 package ac.grim.grimac.events.packets;
 
 import ac.grim.grimac.GrimAPI;
+import ac.grim.grimac.checks.impl.badpackets.BadPacketsB;
 import ac.grim.grimac.player.GrimPlayer;
 import ac.grim.grimac.utils.anticheat.update.*;
 import ac.grim.grimac.utils.blockplace.BlockPlaceResult;
@@ -42,12 +43,8 @@ import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerAc
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSetSlot;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.function.Predicate;
-
 public class CheckManagerListener extends PacketListenerAbstract {
-
-    // Manual filter on FINISH_DIGGING to prevent clients setting non-breakable blocks to air
-    private static final Predicate<StateType> BREAKABLE = type -> !type.isAir() && type.getHardness() != -1.0f && type != StateTypes.WATER && type != StateTypes.LAVA;
+    private static final boolean TELEPORT_CONTAINS_POSITION = PacketEvents.getAPI().getServerManager().getVersion().isNewerThanOrEquals(ServerVersion.V_26_3);
 
     public CheckManagerListener() {
         super(PacketListenerPriority.LOW);
@@ -399,6 +396,20 @@ public class CheckManagerListener extends PacketListenerAbstract {
         }
 
         TeleportAcceptData teleportData = null;
+        WrapperPlayClientTeleportConfirm teleportConfirm = null;
+        if (TELEPORT_CONTAINS_POSITION && event.getPacketType() == PacketType.Play.Client.TELEPORT_CONFIRM) {
+            teleportConfirm = new WrapperPlayClientTeleportConfirm(event);
+
+            if (!Double.isFinite(teleportConfirm.getX()) || !Double.isFinite(teleportConfirm.getY()) || !Double.isFinite(teleportConfirm.getZ()) || !Float.isFinite(teleportConfirm.getYaw()) || !Float.isFinite(teleportConfirm.getPitch())) {
+                event.setCancelled(true);
+                player.onPacketCancel();
+                return;
+            }
+
+            Vector3d position = VectorUtils.clampVector(new Vector3d(teleportConfirm.getX(), teleportConfirm.getY(), teleportConfirm.getZ()));
+            teleportData = player.getSetbackTeleportUtil().checkTeleportQueue(position.getX(), position.getY(), position.getZ(), teleportConfirm.getYaw(), teleportConfirm.getPitch(), teleportConfirm.getTeleportId());
+            player.packetStateData.lastPacketWasTeleport = teleportData.isTeleport();
+        }
 
         if (WrapperPlayClientPlayerFlying.isFlying(event.getPacketType())) {
             player.serverOpenedInventoryThisTick = false;
@@ -408,28 +419,19 @@ public class CheckManagerListener extends PacketListenerAbstract {
             Location location = flying.getLocation();
             Vector3d position = VectorUtils.clampVector(location.getPosition());
             // Teleports must be POS LOOK
-            teleportData = flying.hasPositionChanged() && flying.hasRotationChanged() ? player.getSetbackTeleportUtil().checkTeleportQueue(position.getX(), position.getY(), position.getZ(), location.getYaw(), location.getPitch()) : new TeleportAcceptData();
+            teleportData = !TELEPORT_CONTAINS_POSITION && flying.hasPositionChanged() && flying.hasRotationChanged() ? player.getSetbackTeleportUtil().checkTeleportQueue(position.getX(), position.getY(), position.getZ(), location.getYaw(), location.getPitch()) : new TeleportAcceptData();
             player.packetStateData.lastPacketWasTeleport = teleportData.isTeleport();
 
             if (flying.hasRotationChanged() && !flying.hasPositionChanged() && !flying.isOnGround() && !flying.isHorizontalCollision()) {
-                RotationData last = null;
-                int transaction = player.getLastTransactionReceived();
-                float yaw = flying.getLocation().getYaw();
-                float pitch = flying.getLocation().getPitch();
+                RotationData data = player.pendingRotations.peek();
 
-                for (RotationData data : player.pendingRotations) {
-                    if (transaction == data.getTransaction() && data.allowRotation(yaw, pitch)) {
-                        last = data;
+                if (data != null && data.transaction() == player.getLastTransactionReceived()) {
+                    player.pendingRotations.remove();
+                    if (data.allowRotation(location.getYaw(), location.getPitch())) {
+                        player.packetStateData.lastPacketWasTeleport = true;
+                    } else {
+                        player.checkManager.get(BadPacketsB.class).flag();
                     }
-
-                    if (!data.isAccepted()) {
-                        break;
-                    }
-                }
-
-                if (last != null) {
-                    player.packetStateData.lastPacketWasTeleport = true;
-                    last.accept(); // we could be wrong (especially in vehicles), don't remove this
                 }
             }
 
@@ -439,7 +441,7 @@ public class CheckManagerListener extends PacketListenerAbstract {
             }
         }
 
-        if (player.inVehicle() ? event.getPacketType() == PacketType.Play.Client.VEHICLE_MOVE : WrapperPlayClientPlayerFlying.isFlying(event.getPacketType()) && !player.packetStateData.lastPacketWasOnePointSeventeenDuplicate) {
+        if ((teleportConfirm != null && teleportData.isTeleport()) || (player.inVehicle() ? event.getPacketType() == PacketType.Play.Client.VEHICLE_MOVE : WrapperPlayClientPlayerFlying.isFlying(event.getPacketType()) && !player.packetStateData.lastPacketWasOnePointSeventeenDuplicate)) {
             // Update knockback and explosions immediately, before anything can setback
             int kbEntityId = player.inVehicle() ? player.getRidingVehicleId() : player.entityID;
 
@@ -457,9 +459,15 @@ public class CheckManagerListener extends PacketListenerAbstract {
         player.checkManager.onPrePredictionReceivePacket(event);
 
         // The player flagged crasher or timer checks, therefore we must protect predictions against these attacks
-        if (event.isCancelled() && (WrapperPlayClientPlayerFlying.isFlying(event.getPacketType()) || event.getPacketType() == PacketType.Play.Client.VEHICLE_MOVE)) {
+        if (event.isCancelled() && (teleportConfirm != null || WrapperPlayClientPlayerFlying.isFlying(event.getPacketType()) || event.getPacketType() == PacketType.Play.Client.VEHICLE_MOVE)) {
             player.packetStateData.cancelDuplicatePacket = false;
+            player.packetStateData.lastPacketWasTeleport = false;
             return;
+        }
+
+        if (teleportConfirm != null && teleportData.isTeleport()) {
+            player.serverOpenedInventoryThisTick = false;
+            handleFlying(player, teleportConfirm.getX(), teleportConfirm.getY(), teleportConfirm.getZ(), teleportConfirm.getYaw(), teleportConfirm.getPitch(), true, true, false, teleportData);
         }
 
         if (WrapperPlayClientPlayerFlying.isFlying(event.getPacketType())) {
@@ -727,10 +735,7 @@ public class CheckManagerListener extends PacketListenerAbstract {
             player.vehicleData.playerPitch = pitch;
             player.vehicleData.playerYaw = yaw;
 
-            float deltaXRot = player.yaw - player.lastYaw;
-            float deltaYRot = player.pitch - player.lastPitch;
-
-            final RotationUpdate update = new RotationUpdate(new HeadRotation(player.lastYaw, player.lastPitch), new HeadRotation(player.yaw, player.pitch), deltaXRot, deltaYRot);
+            final RotationUpdate update = new RotationUpdate(player.lastYaw, player.lastPitch, player.yaw, player.pitch);
             player.checkManager.onRotationUpdate(update);
         }
 
@@ -769,6 +774,11 @@ public class CheckManagerListener extends PacketListenerAbstract {
         player.packetStateData.horseInteractCausedForcedRotation = false;
     }
 
+    // Manual filter on FINISH_DIGGING to prevent clients setting non-breakable blocks to air
+    private static boolean isBreakable(@NotNull StateType type) {
+        return !type.isAir() && type.getHardness() != -1.0f && type != StateTypes.WATER && type != StateTypes.LAVA;
+    }
+
     private static void handleDigging(GrimPlayer player, PacketReceiveEvent event) {
         player.lastBlockBreak = System.currentTimeMillis();
 
@@ -794,7 +804,7 @@ public class CheckManagerListener extends PacketListenerAbstract {
 
         player.queuedBreaks.add(blockBreak);
 
-        if (action == DiggingAction.FINISHED_DIGGING && BREAKABLE.test(blockBreak.block.getType())) {
+        if (action == DiggingAction.FINISHED_DIGGING && isBreakable(blockBreak.block.getType())) {
             player.compensatedWorld.startPredicting();
             player.compensatedWorld.updateBlock(blockBreak.position.x, blockBreak.position.y, blockBreak.position.z, 0);
             player.compensatedWorld.stopPredicting(packet);
